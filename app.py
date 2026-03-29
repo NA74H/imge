@@ -1,32 +1,131 @@
-from flask import Flask, request, render_template_string, send_from_directory, redirect, url_for, flash
-from werkzeug.utils import secure_filename
+import streamlit as st
 from PIL import Image
 import numpy as np
-import io, base64, os
+import io
 
-app = Flask(__name__)
-app.secret_key = "secret123"
-UPLOAD_FOLDER = "static/uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
+# ── Page config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Image Matrix Processing Studio",
+    page_icon="🎨",
+    layout="wide",
+)
+
+# ── Custom CSS ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+}
+
+/* Dark sidebar */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+}
+section[data-testid="stSidebar"] * {
+    color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stNumberInput label,
+section[data-testid="stSidebar"] .stFileUploader label {
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #a0aec0 !important;
+}
+
+/* Main background */
+.main .block-container {
+    background: #f0f4f8;
+    padding-top: 2rem;
+}
+
+/* Header */
+.studio-header {
+    font-family: 'Space Mono', monospace;
+    font-size: 2.2rem;
+    font-weight: 700;
+    text-align: center;
+    color: #1a1a2e;
+    margin-bottom: 0.25rem;
+    letter-spacing: -1px;
+}
+.studio-sub {
+    text-align: center;
+    color: #718096;
+    font-size: 1rem;
+    margin-bottom: 2rem;
+}
+
+/* Image cards */
+.img-card {
+    background: white;
+    border-radius: 16px;
+    padding: 1.25rem;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+}
+.img-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #4a5568;
+    margin-bottom: 0.75rem;
+}
+
+/* Note box */
+.note-box {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #e2e8f0;
+    border-radius: 12px;
+    padding: 1.25rem 1.75rem;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    margin-top: 1.5rem;
+    border-left: 4px solid #667eea;
+}
+
+/* Sidebar button */
+div[data-testid="stSidebar"] .stButton > button {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 0.75rem 1.5rem;
+    font-weight: 700;
+    font-size: 0.9rem;
+    letter-spacing: 0.05em;
+    width: 100%;
+    transition: opacity 0.2s;
+}
+div[data-testid="stSidebar"] .stButton > button:hover {
+    opacity: 0.88;
+}
+
+/* Welcome */
+.welcome {
+    text-align: center;
+    padding: 5rem 2rem;
+    color: #718096;
+}
+.welcome-icon { font-size: 5rem; }
+.welcome h3 { color: #4a5568; font-size: 1.4rem; margin: 1rem 0 0.5rem; }
+</style>
+""", unsafe_allow_html=True)
 
 
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def to_float_rgb(img):
+# ── Helper functions ────────────────────────────────────────────────────────────
+def to_float_rgb(img: Image.Image) -> np.ndarray:
     return np.asarray(img.convert("RGB"), dtype=np.float64) / 255.0
 
-def from_float_rgb(A):
-    A8 = np.uint8(np.clip(A * 255, 0, 255))
-    return Image.fromarray(A8, mode="RGB")
+def from_float_rgb(A: np.ndarray) -> Image.Image:
+    return Image.fromarray(np.uint8(np.clip(A * 255, 0, 255)), mode="RGB")
 
-def image_to_base64(img):
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-def conv2d_rgb(A, K):
+def conv2d_rgb(A: np.ndarray, K: np.ndarray) -> np.ndarray:
     kh, kw = K.shape
     pad = kh // 2
     Ah, Aw, _ = A.shape
@@ -38,508 +137,130 @@ def conv2d_rgb(A, K):
                 B[i, j, ch] = np.sum(region * K)
     return np.clip(B, 0, 1)
 
-def svd_compress_rgb(A, k):
+def svd_compress_rgb(A: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     B = np.zeros_like(A)
+    # Capture singular values from the red channel (index 0) up front
+    _, s_vals, _ = np.linalg.svd(A[:, :, 0], full_matrices=False)
     for ch in range(3):
         U, S, Vt = np.linalg.svd(A[:, :, ch], full_matrices=False)
-        Ak = U[:, :k] @ np.diag(S[:k]) @ Vt[:k, :]
-        B[:, :, ch] = Ak
-    return np.clip(B, 0, 1), S
+        B[:, :, ch] = U[:, :k] @ np.diag(S[:k]) @ Vt[:k, :]
+    return np.clip(B, 0, 1), s_vals
 
-HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image Matrix Processing Studio</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+def pil_to_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
-        body {
-            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: #2d3748;
-        }
 
-        .container {
-            display: flex;
-            min-height: 100vh;
-            max-width: 1600px;
-            margin: 0 auto;
-            background: #fff;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
+# ── Sidebar ─────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚙️ Operations Panel")
+    st.markdown("---")
 
-        .sidebar {
-            background: linear-gradient(180deg, #2d3748 0%, #1a202c 100%);
-            padding: 30px;
-            width: 350px;
-            color: #fff;
-            overflow-y: auto;
-            box-shadow: 4px 0 20px rgba(0,0,0,0.1);
-        }
+    uploaded = st.file_uploader("📁 Upload Image", type=["png", "jpg", "jpeg"])
 
-        .sidebar h2 {
-            font-size: 28px;
-            margin-bottom: 25px;
-            color: #fff;
-            text-align: center;
-            padding-bottom: 15px;
-            border-bottom: 2px solid rgba(255,255,255,0.2);
-            letter-spacing: 1px;
-        }
+    operation = st.selectbox("🔧 Operation", options={
+        "view": "View (no change)",
+        "add": "Add Constant",
+        "scale": "Scale (Brightness)",
+        "transpose": "Transpose",
+        "conv": "Convolution (3×3)",
+        "svd": "SVD Compression",
+    })
 
-        .form-group {
-            margin-bottom: 25px;
-            animation: fadeInUp 0.5s ease-out;
-        }
+    kernel = st.selectbox("🎛️ Convolution Kernel", ["Sharpen", "Blur", "Edge Detection", "Emboss"])
 
-        @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+    c_val  = st.number_input("➕ Add Constant (c)", value=0.0, step=0.1, format="%.2f")
+    alpha  = st.number_input("🔆 Scale Factor (α)", value=1.0, step=0.1, format="%.2f")
+    k_rank = st.number_input("📊 SVD Rank (k)", value=20, min_value=1, step=1)
 
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            color: #cbd5e0;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+    apply = st.button("✨ Apply Operation")
 
-        input[type="file"] {
-            width: 100%;
-            padding: 12px;
-            background: rgba(255,255,255,0.1);
-            border: 2px dashed rgba(255,255,255,0.3);
-            border-radius: 8px;
-            color: #fff;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            font-size: 14px;
-        }
 
-        input[type="file"]:hover {
-            background: rgba(255,255,255,0.15);
-            border-color: rgba(255,255,255,0.5);
-        }
+# ── Main area ───────────────────────────────────────────────────────────────────
+st.markdown('<div class="studio-header">🎨 Image Matrix Processing Studio</div>', unsafe_allow_html=True)
+st.markdown('<div class="studio-sub">Explore linear algebra on images — convolutions, SVD compression, and more</div>', unsafe_allow_html=True)
 
-        input[type="file"]::file-selector-button {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            margin-right: 10px;
-            font-weight: 600;
-            transition: all 0.3s ease;
-        }
-
-        input[type="file"]::file-selector-button:hover {
-            background: #5a67d8;
-            transform: translateY(-2px);
-        }
-
-        select, input[type="number"] {
-            width: 100%;
-            padding: 12px;
-            background: rgba(255,255,255,0.95);
-            border: 2px solid transparent;
-            border-radius: 8px;
-            font-size: 14px;
-            color: #2d3748;
-            transition: all 0.3s ease;
-            font-weight: 500;
-        }
-
-        select:focus, input[type="number"]:focus {
-            outline: none;
-            border-color: #667eea;
-            background: #fff;
-            box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
-        }
-
-        .btn {
-            width: 100%;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 15px 24px;
-            border-radius: 10px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(102,126,234,0.4);
-            margin-top: 10px;
-        }
-
-        .btn:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 6px 25px rgba(102,126,234,0.6);
-        }
-
-        .btn:active {
-            transform: translateY(-1px);
-        }
-
-        .content {
-            flex: 1;
-            padding: 50px;
-            background: linear-gradient(180deg, #f7fafc 0%, #edf2f7 100%);
-            overflow-y: auto;
-        }
-
-        h1 {
-            font-size: 36px;
-            color: #2d3748;
-            text-align: center;
-            margin-bottom: 40px;
-            font-weight: 800;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
-            letter-spacing: -0.5px;
-        }
-
-        .emoji {
-            font-size: 42px;
-            display: inline-block;
-            animation: bounce 2s infinite;
-        }
-
-        @keyframes bounce {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
-        }
-
-        .images-container {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 30px;
-            flex-wrap: wrap;
-            margin: 30px 0;
-        }
-
-        .image-box {
-            text-align: center;
-            animation: fadeIn 0.8s ease-out;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.9); }
-            to { opacity: 1; transform: scale(1); }
-        }
-
-        .image-box h3 {
-            margin-bottom: 15px;
-            color: #4a5568;
-            font-size: 18px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .image-wrapper {
-            background: white;
-            padding: 15px;
-            border-radius: 15px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .image-wrapper::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(135deg, rgba(102,126,234,0.1) 0%, rgba(118,75,162,0.1) 100%);
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-
-        .image-wrapper:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 50px rgba(0,0,0,0.25);
-        }
-
-        .image-wrapper:hover::before {
-            opacity: 1;
-        }
-
-        img {
-            max-width: 500px;
-            width: 100%;
-            height: auto;
-            border-radius: 10px;
-            display: block;
-            position: relative;
-        }
-
-        .note {
-            margin-top: 30px;
-            padding: 20px 30px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 12px;
-            box-shadow: 0 8px 30px rgba(102,126,234,0.3);
-            font-size: 15px;
-            line-height: 1.6;
-            text-align: center;
-            font-weight: 500;
-            animation: slideUp 0.6s ease-out;
-        }
-
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .welcome-message {
-            text-align: center;
-            padding: 80px 20px;
-        }
-
-        .welcome-message p {
-            font-size: 20px;
-            color: #718096;
-            line-height: 1.8;
-            max-width: 600px;
-            margin: 0 auto;
-        }
-
-        .icon {
-            font-size: 120px;
-            margin-bottom: 30px;
-            opacity: 0.8;
-            animation: float 3s ease-in-out infinite;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-20px); }
-        }
-
-        /* Scrollbar Styling */
-        .sidebar::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .sidebar::-webkit-scrollbar-track {
-            background: rgba(255,255,255,0.1);
-        }
-
-        .sidebar::-webkit-scrollbar-thumb {
-            background: rgba(255,255,255,0.3);
-            border-radius: 4px;
-        }
-
-        .sidebar::-webkit-scrollbar-thumb:hover {
-            background: rgba(255,255,255,0.5);
-        }
-
-        /* Responsive Design */
-        @media (max-width: 1024px) {
-            .container {
-                flex-direction: column;
-            }
-
-            .sidebar {
-                width: 100%;
-            }
-
-            .images-container {
-                flex-direction: column;
-            }
-
-            img {
-                max-width: 100%;
-            }
-        }
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="sidebar">
-        <h2>⚙️ Operations Panel</h2>
-        <form action="/process" method="POST" enctype="multipart/form-data">
-            <div class="form-group">
-                <label>📁 Upload Image:</label>
-                <input type="file" name="image" accept=".jpg,.png,.jpeg" required>
-            </div>
-
-            <div class="form-group">
-                <label>🔧 Operation:</label>
-                <select name="operation">
-                    <option value="view">View Matrix</option>
-                    <option value="add">Add Constant</option>
-                    <option value="scale">Scale (Brightness)</option>
-                    <option value="transpose">Transpose</option>
-                    <option value="conv">Convolution (3×3)</option>
-                    <option value="svd">SVD Compression</option>
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label>🎛️ Convolution Kernel:</label>
-                <select name="kernel">
-                    <option value="sharpen">Sharpen</option>
-                    <option value="blur">Blur</option>
-                    <option value="edge">Edge Detection</option>
-                    <option value="emboss">Emboss</option>
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label>➕ Add Constant (c):</label>
-                <input type="number" step="0.1" name="c_val" value="0.0">
-            </div>
-
-            <div class="form-group">
-                <label>🔆 Scale Factor (α):</label>
-                <input type="number" step="0.1" name="alpha" value="1.0">
-            </div>
-
-            <div class="form-group">
-                <label>📊 SVD Rank (k):</label>
-                <input type="number" name="k_rank" value="20">
-            </div>
-
-            <button class="btn" type="submit">✨ Apply Operation</button>
-        </form>
+if uploaded is None:
+    st.markdown("""
+    <div class="welcome">
+        <div class="welcome-icon">🖼️</div>
+        <h3>Upload an image to get started</h3>
+        <p>Use the sidebar to upload a photo and choose a matrix operation.<br>
+        Supports PNG, JPG, and JPEG files.</p>
     </div>
-    
-    <div class="content">
-        <h1><span class="emoji">🎨</span> Image Matrix Processing Studio</h1>
-        {% if original_img %}
-            <div class="images-container">
-                <div class="image-box">
-                    <h3>Original Image</h3>
-                    <div class="image-wrapper">
-                        <img src="data:image/png;base64,{{original_img}}" alt="Original">
-                    </div>
-                </div>
-                <div class="image-box">
-                    <h3>Processed Image</h3>
-                    <div class="image-wrapper">
-                        <img src="data:image/png;base64,{{processed_img}}" alt="Processed">
-                    </div>
-                </div>
-            </div>
-            <div class="note">
-                <strong>📝 Operation Details:</strong><br>
-                {{note}}
-            </div>
-        {% else %}
-            <div class="welcome-message">
-                <div class="icon">🖼️</div>
-                <p>
-                    Welcome to the Image Matrix Processing Studio!<br><br>
-                    Upload an image to explore matrix operations including convolution filters, 
-                    SVD compression, and various transformations.
-                </p>
-            </div>
-        {% endif %}
-    </div>
-</div>
-</body>
-</html>
-"""
+    """, unsafe_allow_html=True)
+    st.stop()
 
+# Load image
+img = Image.open(uploaded).convert("RGB")
+A   = to_float_rgb(img)
 
-@app.route("/", methods=["GET"])
-def index():
-    return render_template_string(HTML, original_img=None, processed_img=None, note=None)
-
-@app.route("/process", methods=["POST"])
-def process():
-    file = request.files.get("image")
-    if not file or not file.filename or not allowed_file(file.filename):
-        flash("Invalid file format", "error")
-        return redirect(url_for("index"))
-
-    filename = secure_filename(file.filename)
-    path = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(path)
-
-    img = Image.open(path)
-    A = to_float_rgb(img)
-
-    op = request.form.get("operation", "view")
-    kernel_preset = request.form.get("kernel", "sharpen")
-    c_val = float(request.form.get("c_val", 0.0))
-    alpha = float(request.form.get("alpha", 1.0))
-    k_rank = int(request.form.get("k_rank", 20))
+# Process
+note = ""
+if apply or True:   # always show result after upload
+    op = operation
 
     if op == "view":
-        B = A.copy()
-        note = "Displayed raw color image (no change)."
-    elif op == "add":
-        B = np.clip(A + c_val, 0, 1)
-        note = f"Applied A' = A + {c_val:.2f}"
-    elif op == "scale":
-        B = np.clip(alpha * A, 0, 1)
-        note = f"Applied A' = αA with α={alpha:.2f}"
-    elif op == "transpose":
-        B = np.transpose(A, (1, 0, 2))
-        note = "Applied A' = Aᵀ (transposed each color channel)."
-    elif op == "conv":
-        if kernel_preset == "sharpen":
-            K = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
-        elif kernel_preset == "blur":
-            K = np.ones((3,3))/9.0
-        elif kernel_preset == "edge":
-            K = np.array([[-1,-1,-1],[-1,8,-1],[-1,-1,-1]])
-        elif kernel_preset == "emboss":
-            K = np.array([[-2,-1,0],[-1,1,1],[0,1,2]])
-        else:
-            K = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
+        B    = A.copy()
+        note = "Displayed raw colour image — no transformation applied."
 
-        B = conv2d_rgb(A, K)
-        note = f"Applied {kernel_preset.title()} convolution kernel."
+    elif op == "add":
+        B    = np.clip(A + c_val, 0, 1)
+        note = f"A' = A + {c_val:.2f}  (pixel-wise constant addition)"
+
+    elif op == "scale":
+        B    = np.clip(alpha * A, 0, 1)
+        note = f"A' = α · A  with  α = {alpha:.2f}  (brightness scaling)"
+
+    elif op == "transpose":
+        B    = np.transpose(A, (1, 0, 2))
+        note = "A' = Aᵀ  — each colour channel transposed independently."
+
+    elif op == "conv":
+        kernels = {
+            "Sharpen":       np.array([[0,-1,0],[-1,5,-1],[0,-1,0]], dtype=float),
+            "Blur":          np.ones((3,3), dtype=float) / 9.0,
+            "Edge Detection":np.array([[-1,-1,-1],[-1,8,-1],[-1,-1,-1]], dtype=float),
+            "Emboss":        np.array([[-2,-1,0],[-1,1,1],[0,1,2]], dtype=float),
+        }
+        K    = kernels[kernel]
+        with st.spinner(f"Applying {kernel} convolution… (may take a moment on large images)"):
+            B = conv2d_rgb(A, K)
+        note = f"Applied {kernel} convolution kernel (3×3)."
+
     elif op == "svd":
-        k = min(k_rank, min(A.shape[:2]))
-        B, s = svd_compress_rgb(A, k)
-        note = f"SVD compression with k={k}. Top singular values: {np.round(s[:10],3)}"
+        k = min(int(k_rank), min(A.shape[:2]))
+        with st.spinner(f"Running SVD with rank k={k}…"):
+            B, s = svd_compress_rgb(A, k)
+        top = ", ".join(f"{v:.3f}" for v in s[:8])
+        note = f"SVD compression · rank k = {k}\nTop singular values: [{top}, …]"
+
     else:
-        B = A.copy()
+        B    = A.copy()
         note = "Unknown operation."
 
-    original_img = image_to_base64(img.convert("RGB"))
-    processed_img = image_to_base64(from_float_rgb(B))
-    return render_template_string(HTML, original_img=original_img, processed_img=processed_img, note=note)
+    # Display side-by-side
+    col1, col2 = st.columns(2, gap="large")
 
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+    with col1:
+        st.markdown('<div class="img-card"><div class="img-label">📷 Original Image</div>', unsafe_allow_html=True)
+        st.image(img, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    print("🚀 Running Flask Image Matrix Processing Studio")
-    print("📱 Open http://localhost:5000 in your browser")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    with col2:
+        st.markdown('<div class="img-card"><div class="img-label">✨ Processed Image</div>', unsafe_allow_html=True)
+        processed_img = from_float_rgb(B)
+        st.image(processed_img, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Download button
+        st.download_button(
+            label="⬇️ Download Result",
+            data=pil_to_bytes(processed_img),
+            file_name="processed.png",
+            mime="image/png",
+        )
+
+    # Operation note
+    st.markdown(f'<div class="note-box">📝 <strong>Operation Details</strong><br><br>{note}</div>', unsafe_allow_html=True)
