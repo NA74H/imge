@@ -190,77 +190,76 @@ if uploaded is None:
         Supports PNG, JPG, and JPEG files.</p>
     </div>
     """, unsafe_allow_html=True)
-    st.stop()
+else:
+    # Load image
+    img = Image.open(uploaded).convert("RGB")
+    A   = to_float_rgb(img)
 
-# Load image
-img = Image.open(uploaded).convert("RGB")
-A   = to_float_rgb(img)
+    # Process
+    note = ""
+    if True:   # always show result after upload
+        op = operation
 
-# Process
-note = ""
-if apply or True:   # always show result after upload
-    op = operation
+        if op == "view":
+            B    = A.copy()
+            note = "Displayed raw colour image — no transformation applied."
 
-    if op == "view":
-        B    = A.copy()
-        note = "Displayed raw colour image — no transformation applied."
+        elif op == "add":
+            B    = np.clip(A + c_val, 0, 1)
+            note = f"A' = A + {c_val:.2f}  (pixel-wise constant addition)"
 
-    elif op == "add":
-        B    = np.clip(A + c_val, 0, 1)
-        note = f"A' = A + {c_val:.2f}  (pixel-wise constant addition)"
+        elif op == "scale":
+            B    = np.clip(alpha * A, 0, 1)
+            note = f"A' = α · A  with  α = {alpha:.2f}  (brightness scaling)"
 
-    elif op == "scale":
-        B    = np.clip(alpha * A, 0, 1)
-        note = f"A' = α · A  with  α = {alpha:.2f}  (brightness scaling)"
+        elif op == "transpose":
+            B    = np.transpose(A, (1, 0, 2))
+            note = "A' = Aᵀ  — each colour channel transposed independently."
 
-    elif op == "transpose":
-        B    = np.transpose(A, (1, 0, 2))
-        note = "A' = Aᵀ  — each colour channel transposed independently."
+        elif op == "conv":
+            kernels = {
+                "Sharpen":       np.array([[0,-1,0],[-1,5,-1],[0,-1,0]], dtype=float),
+                "Blur":          np.ones((3,3), dtype=float) / 9.0,
+                "Edge Detection":np.array([[-1,-1,-1],[-1,8,-1],[-1,-1,-1]], dtype=float),
+                "Emboss":        np.array([[-2,-1,0],[-1,1,1],[0,1,2]], dtype=float),
+            }
+            K    = kernels[kernel]
+            with st.spinner(f"Applying {kernel} convolution… (may take a moment on large images)"):
+                B = conv2d_rgb(A, K)
+            note = f"Applied {kernel} convolution kernel (3×3)."
 
-    elif op == "conv":
-        kernels = {
-            "Sharpen":       np.array([[0,-1,0],[-1,5,-1],[0,-1,0]], dtype=float),
-            "Blur":          np.ones((3,3), dtype=float) / 9.0,
-            "Edge Detection":np.array([[-1,-1,-1],[-1,8,-1],[-1,-1,-1]], dtype=float),
-            "Emboss":        np.array([[-2,-1,0],[-1,1,1],[0,1,2]], dtype=float),
-        }
-        K    = kernels[kernel]
-        with st.spinner(f"Applying {kernel} convolution… (may take a moment on large images)"):
-            B = conv2d_rgb(A, K)
-        note = f"Applied {kernel} convolution kernel (3×3)."
+        elif op == "svd":
+            k = min(int(k_rank), min(A.shape[:2]))
+            with st.spinner(f"Running SVD with rank k={k}…"):
+                B, s = svd_compress_rgb(A, k)
+            top = ", ".join(f"{v:.3f}" for v in s[:8])
+            note = f"SVD compression · rank k = {k}\nTop singular values: [{top}, …]"
 
-    elif op == "svd":
-        k = min(int(k_rank), min(A.shape[:2]))
-        with st.spinner(f"Running SVD with rank k={k}…"):
-            B, s = svd_compress_rgb(A, k)
-        top = ", ".join(f"{v:.3f}" for v in s[:8])
-        note = f"SVD compression · rank k = {k}\nTop singular values: [{top}, …]"
+        else:
+            B    = A.copy()
+            note = "Unknown operation."
 
-    else:
-        B    = A.copy()
-        note = "Unknown operation."
+        # Display side-by-side
+        col1, col2 = st.columns(2, gap="large")
 
-    # Display side-by-side
-    col1, col2 = st.columns(2, gap="large")
+        with col1:
+            st.markdown('<div class="img-card"><div class="img-label">📷 Original Image</div>', unsafe_allow_html=True)
+            st.image(img, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    with col1:
-        st.markdown('<div class="img-card"><div class="img-label">📷 Original Image</div>', unsafe_allow_html=True)
-        st.image(img, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        with col2:
+            st.markdown('<div class="img-card"><div class="img-label">✨ Processed Image</div>', unsafe_allow_html=True)
+            processed_img = from_float_rgb(B)
+            st.image(processed_img, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    with col2:
-        st.markdown('<div class="img-card"><div class="img-label">✨ Processed Image</div>', unsafe_allow_html=True)
-        processed_img = from_float_rgb(B)
-        st.image(processed_img, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+            # Download button
+            st.download_button(
+                label="⬇️ Download Result",
+                data=pil_to_bytes(processed_img),
+                file_name="processed.png",
+                mime="image/png",
+            )
 
-        # Download button
-        st.download_button(
-            label="⬇️ Download Result",
-            data=pil_to_bytes(processed_img),
-            file_name="processed.png",
-            mime="image/png",
-        )
-
-    # Operation note
-    st.markdown(f'<div class="note-box">📝 <strong>Operation Details</strong><br><br>{note}</div>', unsafe_allow_html=True)
+        # Operation note
+        st.markdown(f'<div class="note-box">📝 <strong>Operation Details</strong><br><br>{note}</div>', unsafe_allow_html=True)
